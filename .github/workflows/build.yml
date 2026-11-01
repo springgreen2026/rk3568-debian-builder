@@ -24,12 +24,14 @@ jobs:
           mkdir -p output
           curl -fL --retry 3 'https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_bookworm_arm64_server_2026.10/Armbian_26.11.0_rockchip_alark35-3500_bookworm_6.18.57_server_2026.10.17.img.gz' -o output/base.img.gz
           gzip -t output/base.img.gz
-          gzip -dc output/base.img.gz | head -c 1048576 > output/image-header.bin
-          file output/image-header.bin
-          ls -lh output/base.img.gz
+          gzip -dc output/base.img.gz > output/base.img
+          fdisk -l output/base.img | tee output/partition-table.txt
+          ls -lh output/base.img.gz output/base.img
+          rm output/base.img
+          rm output/base.img.gz
       - name: Save inspection results
         uses: actions/upload-artifact@v4
         with:
           name: alark35-3500-inspection
-          path: output/
+          path: output/partition-table.txt
           retention-days: 3
