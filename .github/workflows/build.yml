@@ -1,0 +1,35 @@
+name: Inspect ALARK35-3500 base image
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type INSPECT to start the inspection
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  inspect:
+    if: ${{ inputs.confirm == 'INSPECT' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Install inspection tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y fdisk gzip
+      - name: Download and inspect image
+        run: |
+          set -euxo pipefail
+          mkdir -p output
+          curl -fL --retry 3 'https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_bookworm_arm64_server_2026.10/Armbian_26.11.0_rockchip_alark35-3500_bookworm_6.18.57_server_2026.10.17.img.gz' -o output/base.img.gz
+          gzip -t output/base.img.gz
+          gzip -dc output/base.img.gz | head -c 1048576 > output/image-header.bin
+          file output/image-header.bin
+          ls -lh output/base.img.gz
+      - name: Save inspection results
+        uses: actions/upload-artifact@v4
+        with:
+          name: alark35-3500-inspection
+          path: output/
+          retention-days: 3
