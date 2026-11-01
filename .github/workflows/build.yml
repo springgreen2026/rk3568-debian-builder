@@ -1,4 +1,5 @@
 name: Inspect ALARK35-3500 base image
+
 on:
   workflow_dispatch:
     inputs:
@@ -6,32 +7,98 @@ on:
         description: Type INSPECT to start the inspection
         required: true
         type: string
+
 permissions:
   contents: read
+
 jobs:
   inspect:
     if: ${{ inputs.confirm == 'INSPECT' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+
     steps:
       - name: Install inspection tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y fdisk gzip
-      - name: Download and inspect image
+          sudo apt-get install -y fdisk gzip util-linux e2fsprogs
+
+      - name: Download and inspect image filesystems
         run: |
           set -euxo pipefail
-          mkdir -p output
-          curl -fL --retry 3 'https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_bookworm_arm64_server_2026.10/Armbian_26.11.0_rockchip_alark35-3500_bookworm_6.18.57_server_2026.10.17.img.gz' -o output/base.img.gz
+          mkdir -p output mnt/p1 mnt/p2
+
+          curl -fL --retry 3 \
+            'https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_bookworm_arm64_server_2026.10/Armbian_26.11.0_rockchip_alark35-3500_bookworm_6.18.57_server_2026.10.17.img.gz' \
+            -o output/base.img.gz
+
           gzip -t output/base.img.gz
           gzip -dc output/base.img.gz > output/base.img
+
           fdisk -l output/base.img | tee output/partition-table.txt
-          ls -lh output/base.img.gz output/base.img
-          rm output/base.img
-          rm output/base.img.gz
+
+          sudo losetup --find --show --partscan output/base.img \
+            | tee output/loopdev.txt
+
+          LOOPDEV="$(cat output/loopdev.txt)"
+          sudo udevadm settle
+
+          sudo lsblk -f "$LOOPDEV" \
+            | tee output/lsblk-filesystems.txt
+
+          sudo blkid "${LOOPDEV}p1" "${LOOPDEV}p2" \
+            | tee output/blkid.txt || true
+
+          for n in 1 2; do
+            PART="${LOOPDEV}p${n}"
+            MNT="mnt/p${n}"
+
+            if sudo mount -o ro "$PART" "$MNT"; then
+              sudo find "$MNT" -maxdepth 4 -type f \
+                -printf '%P\n' 2>/dev/null \
+                | sort > "output/partition${n}-files.txt" || true
+
+              if [ "$n" = "1" ]; then
+                sudo find "$MNT" -maxdepth 5 -type f \
+                  \( -iname '*Image*' -o -iname '*vmlinuz*' \
+                  -o -iname '*uInitrd*' -o -iname '*initrd*' \
+                  -o -iname '*.dtb' -o -iname 'extlinux.conf' \
+                  -o -iname 'armbianEnv.txt' -o -iname 'boot.scr' \) \
+                  -printf '%P\n' 2>/dev/null \
+                  | sort > output/boot-candidates.txt || true
+              fi
+
+              if [ "$n" = "2" ]; then
+                if [ -f "$MNT/etc/os-release" ]; then
+                  sudo cat "$MNT/etc/os-release" > output/os-release.txt
+                fi
+
+                if [ -d "$MNT/boot" ]; then
+                  sudo find "$MNT/boot" -maxdepth 5 -type f \
+                    -printf '%P\n' 2>/dev/null \
+                    | sort > output/root-boot-files.txt || true
+                fi
+
+                if [ -f "$MNT/etc/fstab" ]; then
+                  sudo cat "$MNT/etc/fstab" > output/fstab.txt
+                fi
+              fi
+
+              sudo umount "$MNT"
+            else
+              echo "Could not mount $PART read-only" \
+                | tee "output/partition${n}-mount-error.txt"
+            fi
+          done
+
+          sudo losetup -d "$LOOPDEV"
+          ls -lh output
+
+          rm -f output/base.img output/base.img.gz
+
       - name: Save inspection results
         uses: actions/upload-artifact@v4
         with:
-          name: alark35-3500-inspection
-          path: output/partition-table.txt
+          name: alark35-3500-filesystem-inspection
+          path: output/*
           retention-days: 3
