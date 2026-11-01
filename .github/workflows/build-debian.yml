@@ -1,0 +1,93 @@
+name: Build Debian Bookworm ARM64 for ALARK35-3500
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: Type BUILD-DEBIAN to build a new Debian image
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: ${{ inputs.confirm == 'BUILD-DEBIAN' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Install image-building tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y debootstrap qemu-user-static binfmt-support \
+            fdisk gzip util-linux e2fsprogs rsync openssl
+
+      - name: Download board image and back up hardware-specific files
+        run: |
+          set -euxo pipefail
+          mkdir -p output mnt/boot mnt/rootfs backup
+          curl -fL --retry 3 \
+            'https://github.com/ophub/amlogic-s9xxx-armbian/releases/download/Armbian_bookworm_arm64_server_2026.10/Armbian_26.11.0_rockchip_alark35-3500_bookworm_6.18.57_server_2026.10.17.img.gz' \
+            -o output/debian-alark35-3500.img.gz
+          gzip -t output/debian-alark35-3500.img.gz
+          gzip -dc output/debian-alark35-3500.img.gz > output/debian-alark35-3500.img
+          LOOPDEV=$(sudo losetup --find --show --partscan output/debian-alark35-3500.img)
+          echo "$LOOPDEV" > output/loopdev.txt
+          sudo udevadm settle
+          sudo mount "${LOOPDEV}p1" mnt/boot
+          sudo mount "${LOOPDEV}p2" mnt/rootfs
+          sudo tar -C mnt/rootfs -cpf backup/hardware.tar lib/modules usr/lib/firmware boot
+          sudo cp -a mnt/rootfs/etc/fstab backup/fstab
+          # Empty the existing root filesystem while retaining its partition and UUID.
+          sudo find mnt/rootfs -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+
+      - name: Install genuine Debian Bookworm ARM64 minimal rootfs
+        run: |
+          set -euxo pipefail
+          LOOPDEV="$(cat output/loopdev.txt)"
+          sudo debootstrap --arch=arm64 --foreign --variant=minbase \
+            bookworm mnt/rootfs https://deb.debian.org/debian
+          sudo cp /usr/bin/qemu-aarch64-static mnt/rootfs/usr/bin/
+          sudo chroot mnt/rootfs /debootstrap/debootstrap --second-stage
+          sudo tar -C mnt/rootfs -xpf backup/hardware.tar
+          sudo cp backup/fstab mnt/rootfs/etc/fstab
+          sudo chroot mnt/rootfs /usr/bin/env DEBIAN_FRONTEND=noninteractive \
+            apt-get update
+          sudo chroot mnt/rootfs /usr/bin/env DEBIAN_FRONTEND=noninteractive \
+            apt-get install -y --no-install-recommends \
+            systemd-sysv dbus openssh-server systemd-resolved \
+            iproute2 iputils-ping isc-dhcp-client \
+            ca-certificates curl wget sudo locales
+          sudo mkdir -p mnt/rootfs/etc/systemd/network
+          printf '[Match]\nName=en* eth*\n\n[Network]\nDHCP=yes\n' \
+            | sudo tee mnt/rootfs/etc/systemd/network/20-wired.network >/dev/null
+          printf 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nNAME="Debian GNU/Linux"\nVERSION_ID="12"\nVERSION="12 (bookworm)"\nVERSION_CODENAME=bookworm\nID=debian\nHOME_URL="https://www.debian.org/"\nSUPPORT_URL="https://www.debian.org/support"\nBUG_REPORT_URL="https://bugs.debian.org/"\n' \
+            | sudo tee mnt/rootfs/etc/os-release >/dev/null
+          printf 'debian\n' | sudo tee mnt/rootfs/etc/hostname >/dev/null
+          printf '127.0.0.1 localhost\n127.0.1.1 debian\n' \
+            | sudo tee mnt/rootfs/etc/hosts >/dev/null
+          # Generate a one-time root password; it is uploaded only as a short-lived artifact.
+          ROOTPW="$(openssl rand -base64 18 | tr -d '\n')"
+          printf 'root:%s\n' "$ROOTPW" | sudo chroot mnt/rootfs chpasswd
+          printf 'Username: root\nPassword: %s\n' "$ROOTPW" > output/first-login.txt
+          sudo chroot mnt/rootfs systemctl enable systemd-networkd.service systemd-resolved.service ssh.service
+          sudo ln -sf /run/systemd/resolve/stub-resolv.conf mnt/rootfs/etc/resolv.conf
+          sudo rm -f mnt/rootfs/usr/bin/qemu-aarch64-static
+          sudo sync
+          sudo umount mnt/rootfs
+          sudo umount mnt/boot
+          sudo losetup -d "$LOOPDEV"
+          gzip -1 output/debian-alark35-3500.img
+          sha256sum output/debian-alark35-3500.img.gz | tee output/SHA256SUMS.txt
+          ls -lh output/debian-alark35-3500.img.gz output/SHA256SUMS.txt output/first-login.txt
+
+      - name: Upload Debian image and first-login details
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-bookworm-arm64-alark35-3500
+          path: |
+            output/debian-alark35-3500.img.gz
+            output/SHA256SUMS.txt
+            output/first-login.txt
+          retention-days: 7
